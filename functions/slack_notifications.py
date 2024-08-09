@@ -2,8 +2,9 @@ import http.client
 import json
 import logging
 import os
-
+import re
 import boto3
+import urllib.parse
 
 # Boolean flag, which determins if the incoming even should be printed to the output.
 LOG_EVENTS = os.getenv("LOG_EVENTS", "False").lower() in ("true", "1", "t", "yes", "y")
@@ -53,7 +54,8 @@ def get_slack_credentials(value: str, source_type: str) -> str:
 
     except Exception as e:
         raise RuntimeError(
-            f"Error getting slack credentials from {source_type} `{value}`: {e}"
+            f"Error getting slack credentials from \
+                {source_type} `{value}`: {e}"
         ) from e
 
 
@@ -227,13 +229,80 @@ def ecs_events_parser(detail_type, detail):
                         + ": "
                         + str(container.get("exitCode", "unknown"))
                     )
+                    if str(container.get("exitCode", "unknown")) == "1":
+                        log_group_name = (
+                            "/ecs/"
+                            + detail.get("group").split(":")[1].split("-service")[0]
+                        )
+                        log_stream_name = container.get("runtimeId").split("-")[0]
+                        if log_group_name and log_stream_name:
+                            logs = get_container_logs(log_group_name, log_stream_name)
+                            result = result + "\n" + logs + "\n"
         return result
 
     return f"*Event Detail:* ```{json.dumps(detail, indent=4)}```"
 
 
+def generate_cloudwatch_url(log_stream):
+    # URL 인코딩
+    log_stream_encoded = urllib.parse.quote(log_stream, safe="")
+
+    # AWS CloudWatch URL 생성
+    region = "ap-northeast-2"
+    log_group = "/ecs/tlona-develop-cms-web-api"
+    base_url = f"https://{region}.console.aws.amazon.com/cloudwatch/home"
+
+    cloudwatch_url = f"{base_url}?region={region}#logsV2:log-groups/log-group/\
+{urllib.parse.quote(log_group, safe='')}/log-events/{log_stream_encoded}"
+
+    return cloudwatch_url
+
+
+def get_container_logs(log_group_name, containerId):
+    service_name = "-".join(log_group_name.split("/")[2].split("-")[2:])
+    lsnp = f"{service_name}/tlona-{service_name}-container/{containerId}"
+    client = boto3.client("logs")
+    log_url = generate_cloudwatch_url(lsnp)
+    try:
+        log_streams = client.describe_log_streams(
+            logGroupName=log_group_name,
+            logStreamNamePrefix=lsnp,
+            descending=True,
+            limit=1,
+        )
+
+        if not log_streams["logStreams"]:
+            return "No logs found for the container."
+
+        log_stream_name = log_streams["logStreams"][0]["logStreamName"]
+        log_stream_arn = log_streams["logStreams"][0]["arn"]
+        log_events = client.get_log_events(
+            logStreamName=log_stream_name,
+            logGroupIdentifier=log_stream_arn,
+            limit=25,
+            startFromHead=False,
+        )
+
+        logs = [event["message"] for event in log_events["events"]]
+        str_logs = "\n".join(logs)
+        ansi_escape = re.compile(r"\x1B[@-_][0-?]*[ -/]*[@-~]")
+        clean_log = ansi_escape.sub("", str_logs)
+        return (
+            "```\n"
+            + clean_log.replace("    ", "")
+            + "\n```"
+            + "\n\n"
+            + f"CloudWatch Logs Url:\n>{log_url}"
+        )
+    except Exception as e:
+        log.error(f"Error fetching logs: {e}")
+        return "Error fetching logs."
+
+
 # Input: EventBridge Message
 # Output: Slack Message
+
+
 def event_to_slack_message(event):
     event_id = event.get("id")
     detail_type = event.get("detail-type")
@@ -287,7 +356,6 @@ def event_to_slack_message(event):
 # Slack web hook example
 # https://hooks.slack.com/services/XXXXXXX/XXXXXXX/XXXXXXXXXX
 def post_slack_message(hook_url, message):
-    log.debug(f"Sending message: {json.dumps(message, indent=4)}")
     headers = {"Content-type": "application/json"}
     connection = http.client.HTTPSConnection("hooks.slack.com")
     connection.request(
@@ -297,9 +365,9 @@ def post_slack_message(hook_url, message):
         headers,
     )
     response = connection.getresponse()
-    log.debug(
-        "Response: {}, message: {}".format(response.status, response.read().decode())
-    )
+    response_body = response.read().decode()
+    if response.status != 200:
+        raise Exception(f"Slack API error: {response.status} - {response_body}")
     return response.status
 
 
@@ -317,12 +385,6 @@ def lambda_handler(event, context):
 
     slack_message = event_to_slack_message(event)
     response = post_slack_message(SLACK_WEBHOOK_URL, slack_message)
-    if response != 200:
-        log.error(
-            "Error: received status `{}` using event `{}` and context `{}`".format(
-                response, event, context
-            )
-        )
     return json.dumps({"code": response})
 
 
