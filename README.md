@@ -1,3 +1,17 @@
+## Diff with origin
+
+In the original repository, the ECS task status change to "STOP" would only notify us of the event. However, in the updated repository, I have implemented a feature that retrieves and displays the CloudWatch logs for the container that transitioned to the "STOP" state. This enhancement allows us to receive more detailed information via Slack, eliminating the need to separately check the logs to understand the reason for the task stopping.
+
+### example
+*before*
+![image](https://github.com/user-attachments/assets/f26aa049-1710-464f-887c-b6aa624f8bae)
+
+*after*
+![image](https://github.com/user-attachments/assets/d2a1fae3-d3c1-4726-b865-915222bd01a6)
+
+the end.
+
+---
 [![FivexL](https://releases.fivexl.io/fivexlbannergit.jpg)](https://fivexl.io/)
 
 # terraform-aws-ecs-events-to-slack
