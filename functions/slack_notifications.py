@@ -236,64 +236,85 @@ def ecs_events_parser(detail_type, detail):
                         )
                         log_stream_name = container.get("runtimeId").split("-")[0]
                         if log_group_name and log_stream_name:
-                            logs = get_container_logs(log_group_name, log_stream_name)
+                            logs = get_container_logs(
+                                log_group_name, log_stream_name, task_definition
+                            )
                             result = result + "\n" + logs + "\n"
         return result
 
     return f"*Event Detail:* ```{json.dumps(detail, indent=4)}```"
 
 
-def generate_cloudwatch_url(log_stream):
+def generate_cloudwatch_url(log_stream, log_group_name):
     # URL 인코딩
     log_stream_encoded = urllib.parse.quote(log_stream, safe="")
 
     # AWS CloudWatch URL 생성
     region = "ap-northeast-2"
-    log_group = "/ecs/tlona-develop-cms-web-api"
+    remote = f"/ecs/{log_group_name}"
     base_url = f"https://{region}.console.aws.amazon.com/cloudwatch/home"
 
     cloudwatch_url = f"{base_url}?region={region}#logsV2:log-groups/log-group/\
-{urllib.parse.quote(log_group, safe='')}/log-events/{log_stream_encoded}"
+{urllib.parse.quote(remote, safe='')}/log-events/{log_stream_encoded}"
 
     return cloudwatch_url
 
 
-def get_container_logs(log_group_name, containerId):
+def get_container_logs(log_group_name, containerId, task_definition):
+    ecs_client = boto3.client("ecs")
     service_name = "-".join(log_group_name.split("/")[2].split("-")[2:])
-    lsnp = f"{service_name}/tlona-{service_name}-container/{containerId}"
+    lsnp = f"{service_name}/{service_name}-container/{containerId}"
     client = boto3.client("logs")
-    log_url = generate_cloudwatch_url(lsnp)
+    log_url = generate_cloudwatch_url(lsnp, log_group_name)
+    log_list = []
     try:
-        log_streams = client.describe_log_streams(
-            logGroupName=log_group_name,
-            logStreamNamePrefix=lsnp,
-            descending=True,
-            limit=1,
+        log.info(f"Fetching logs for {log_group_name} {containerId}")
+        log.info(f"lsnp: {lsnp}")
+        log.info(f"task_definition: {task_definition}")
+        task_definition_resource = ecs_client.describe_task_definition(
+            taskDefinition=task_definition
         )
+        container_definitions = task_definition_resource["taskDefinition"][
+            "containerDefinitions"
+        ]
+        for container in container_definitions:
+            if "logConfiguration" in container:
+                log_config = container["logConfiguration"]
+                if log_config["logDriver"] == "awslogs":
+                    log_group_name = log_config["options"]["awslogs-group"]
 
-        if not log_streams["logStreams"]:
-            return "No logs found for the container."
+                    log_streams = client.describe_log_streams(
+                        logGroupName=log_group_name,
+                        logStreamNamePrefix=lsnp,
+                        descending=True,
+                        limit=1,
+                    )
 
-        log_stream_name = log_streams["logStreams"][0]["logStreamName"]
-        log_stream_arn = log_streams["logStreams"][0]["arn"]
-        log_events = client.get_log_events(
-            logStreamName=log_stream_name,
-            logGroupIdentifier=log_stream_arn,
-            limit=25,
-            startFromHead=False,
-        )
+                    if not log_streams["logStreams"]:
+                        return "No logs found for the container."
 
-        logs = [event["message"] for event in log_events["events"]]
-        str_logs = "\n".join(logs)
-        ansi_escape = re.compile(r"\x1B[@-_][0-?]*[ -/]*[@-~]")
-        clean_log = ansi_escape.sub("", str_logs)
-        return (
-            "```\n"
-            + clean_log.replace("    ", "")
-            + "\n```"
-            + "\n\n"
-            + f"CloudWatch Logs Url:\n>{log_url}"
-        )
+                    log_stream_name = log_streams["logStreams"][0]["logStreamName"]
+                    log_stream_arn = log_streams["logStreams"][0]["arn"]
+                    log_events = client.get_log_events(
+                        logStreamName=log_stream_name,
+                        logGroupIdentifier=log_stream_arn,
+                        limit=25,
+                        startFromHead=False,
+                    )
+
+                    logs = [event["message"] for event in log_events["events"]]
+                    str_logs = "\n".join(logs)
+                    ansi_escape = re.compile(r"\x1B[@-_][0-?]*[ -/]*[@-~]")
+                    clean_log = ansi_escape.sub("", str_logs).replace("    ", "")
+                    if clean_log:
+                        log_list.append(
+                            "```\n"
+                            + clean_log.replace("    ", "")
+                            + "\n```"
+                            + "\n\n"
+                            + f"CloudWatch Logs Url:\n>{log_url}"
+                        )
+        return "\n\n".join(log_list)
     except Exception as e:
         log.error(f"Error fetching logs: {e}")
         return "Error fetching logs."
